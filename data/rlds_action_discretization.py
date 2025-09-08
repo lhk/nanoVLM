@@ -47,6 +47,18 @@ def calculate_and_save_action_bins(dataset_base_path: str, num_bins: int, output
     for path in dataset_paths:
         try:
             builder = tfds.builder_from_directory(builder_dir=path)
+            
+            # Check what splits are available
+            split_info = builder.info.splits
+            available_splits = list(split_info.keys())
+            print(f"\nDataset: {os.path.basename(path)}")
+            print(f"  Available splits: {available_splits}")
+            
+            # Print detailed info for each split
+            for split_name in available_splits:
+                split_stats = split_info[split_name]
+                print(f"    {split_name}: {split_stats.num_examples} examples")
+            
             ds = builder.as_dataset(split='train')
             datasets.append(ds)
         except Exception as e:
@@ -57,13 +69,39 @@ def calculate_and_save_action_bins(dataset_base_path: str, num_bins: int, output
         print("Error: No valid datasets could be loaded.")
         return
 
-    # Create a single, interleaved dataset from all sources
-    interleaved_dataset = tf.data.Dataset.sample_from_datasets(datasets, stop_on_empty_dataset=False)
+    # First, calculate individual dataset lengths by processing each dataset separately
+    dataset_steps = []
+    print("\nCalculating individual dataset lengths...")
+    for i, path in enumerate(dataset_paths):
+        try:
+            builder = tfds.builder_from_directory(builder_dir=path)
+            ds = builder.as_dataset(split='train')
+            
+            # Count steps in this dataset
+            dataset_step_count = 0
+            for episode in ds:
+                for step in episode['steps'].as_numpy_iterator():
+                    dataset_step_count += 1
+            
+            dataset_steps.append(dataset_step_count)
+            print(f"  {os.path.basename(path)}: {dataset_step_count} steps")
+        except Exception as e:
+            print(f"Warning: Could not process dataset {path}. Error: {e}")
+            dataset_steps.append(0)
 
-    print("\nCollecting all actions and counting steps from the combined dataset. This may take a while...")
+    # Create a single, concatenated dataset from all sources for action collection
+    if len(datasets) == 1:
+        concatenated_dataset = datasets[0]
+    else:
+        concatenated_dataset = datasets[0]
+        for ds in datasets[1:]:
+            concatenated_dataset = concatenated_dataset.concatenate(ds)
+
+    print("\nCollecting all actions from the combined dataset. This may take a while...")
     all_actions = []
     total_steps = 0
-    for episode in tqdm(interleaved_dataset, desc="Processing episodes"):
+    
+    for episode in tqdm(concatenated_dataset, desc="Processing episodes"):
         # Each episode has a 'steps' feature which is a Dataset of steps
         for step in episode['steps'].as_numpy_iterator():
             all_actions.append(step['action'])
@@ -103,11 +141,18 @@ def calculate_and_save_action_bins(dataset_base_path: str, num_bins: int, output
     print(f"\nAction bin boundaries calculated with shape: {action_bins.shape}")
     print(f"Saved action bins to '{output_path}'")
 
-    # Save the dataset info (total steps) to a JSON file
-    dataset_info = {"total_steps": total_steps}
+    # Save the dataset info (total steps and per-dataset steps) to a JSON file
+    dataset_info = {
+        "total_steps": total_steps,
+        "dataset_steps": dataset_steps,
+        "dataset_paths": [os.path.basename(path) for path in dataset_paths]
+    }
     with open(info_output_path, 'w') as f:
         json.dump(dataset_info, f, indent=4)
     print(f"Saved dataset info to '{info_output_path}'")
+    print(f"Dataset breakdown:")
+    for i, (path, steps) in enumerate(zip(dataset_paths, dataset_steps)):
+        print(f"  {os.path.basename(path)}: {steps} steps")
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate and save action bins from multiple RLDS datasets.")

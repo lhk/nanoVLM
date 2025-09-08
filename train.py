@@ -30,7 +30,7 @@ from models.vision_language_model import VisionLanguageModel
 import models.config as config
 import models.utils as utils
 from data.data_utils import synchronized_dataloader_step
-from data.rlds_generator import RLDSDataGenerator
+from data.rlds_sequential_generator import RLDSDataGenerator
 
 #Otherwise, the tokenizer will throw a warning
 import os
@@ -115,22 +115,18 @@ def get_dataloaders(train_cfg, vlm_cfg):
         print(f"Train: Action token start ID is {action_token_begin_id}")
 
         train_generator = RLDSDataGenerator(
-            rlds_paths=dataset_paths,
+            rlds_paths=dataset_paths[:3],
             tokenizer=tokenizer,
             action_bins_path=action_bins_path,
             action_bins_info_path=action_bins_info_path,
             action_token_begin_id=action_token_begin_id,
-            split='train',
-            val_ratio=train_cfg.val_ratio,
         )
         val_generator = RLDSDataGenerator(
-            rlds_paths=dataset_paths,
+            rlds_paths=dataset_paths[3],
             tokenizer=tokenizer,
             action_bins_path=action_bins_path,
             action_bins_info_path=action_bins_info_path,
             action_token_begin_id=action_token_begin_id,
-            split='validation',
-            val_ratio=train_cfg.val_ratio,
         )
 
         # 2. Wrap each generator with VQAIterableDataset to apply model-specific processing
@@ -383,7 +379,7 @@ def train(train_cfg, vlm_cfg):
                 print(f"   - Images count: {len(batch['images'])}")
                 print(f"   - Data loading took: {time.time() - data_load_start:.2f}s")
             
-            is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0 or i + 1 == len(train_loader)
+            is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0
             batch_start_time = time.time()
             images = batch["images"]
             input_ids = batch["input_ids"].to(device)
