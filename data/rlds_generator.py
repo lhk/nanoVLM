@@ -76,7 +76,7 @@ class RLDSDataGenerator(IterableDataset):
             ds = builder.as_dataset(split='train')
             datasets.append(ds)
         
-        interleaved_dataset = tf.data.Dataset.sample_from_datasets(datasets, stop_on_empty_dataset=True)
+        interleaved_dataset = tf.data.Dataset.sample_from_datasets(datasets, stop_on_empty_dataset=False, seed=0)
         return interleaved_dataset
 
     def __len__(self):
