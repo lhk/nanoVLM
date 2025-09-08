@@ -45,7 +45,7 @@ class VLMConfig:
       "r3c1": "<row_3_col_1>", "r3c2": "<row_3_col_2>", "r3c3": "<row_3_col_3>", "r3c4": "<row_3_col_4>",
       "r4c1": "<row_4_col_1>", "r4c2": "<row_4_col_2>", "r4c3": "<row_4_col_3>", "r4c4": "<row_4_col_4>"})
     vlm_load_backbone_weights: bool = True
-    vlm_checkpoint_path: str = 'checkpoints'
+    vlm_checkpoint_path: str = 'lusxvr/nanoVLM-222M'
     hf_repo_name: str = 'nanoVLM'
 
 
@@ -55,8 +55,8 @@ class TrainConfig:
     lr_backbones: float = 5e-5
     data_cutoff_idx: int = None
     val_ratio: float = 0.025
-    batch_size: int = 8
-    gradient_accumulation_steps: int = 8
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 16
     max_grad_norm: float = 1.0
     eval_in_epochs: bool = True
     eval_interval: int = gradient_accumulation_steps * 100
@@ -69,12 +69,16 @@ class TrainConfig:
     resume_from_vlm_checkpoint: bool = False # Indicate if the training should be resumed from a checkpoint of the whole VLM or you want to start from scratch
     train_dataset_path: str = 'HuggingFaceM4/the_cauldron'
     train_dataset_name: tuple[str, ...] = ("all", )
-    wandb_entity: str = "HuggingFace" # Indicate the entity to log to in wandb
+    wandb_entity: str = "privatlarsklein-personal" # Indicate the entity to log to in wandb
     log_wandb: bool = True
     use_lmms_eval: bool = True # Use lmms-eval for evaluation
     lmms_eval_tasks: str = 'mmstar,mmmu,ocrbench,textvqa' # Pass additional task as one string, seperated by commas without spaces (e.g. 'mmstar,mmmu,ocrbench')
     lmms_eval_limit: int = 2000
     lmms_eval_batch_size: int = 128
+
+    # Train on the special RLDS dataset
+    # ToDo: make this more flexible, expose custom RLDS dataset?
+    use_rlds: bool = True
 
     # LoRA Configuration
     use_lora: bool = True

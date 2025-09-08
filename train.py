@@ -13,6 +13,8 @@ from datasets import load_dataset, concatenate_datasets, get_dataset_config_name
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
+import glob
+import numpy as np
 from peft import LoraConfig, get_peft_model, TaskType
 
 torch.manual_seed(0)
@@ -21,12 +23,14 @@ if torch.cuda.is_available():
 
 from data.collators import VQACollator
 from data.datasets import VQADataset
+from data.datasets_iterable import VQAIterableDataset
 from data.advanced_datasets import ConstantLengthDataset
 from data.processors import get_image_processor, get_tokenizer
 from models.vision_language_model import VisionLanguageModel
 import models.config as config
 import models.utils as utils
 from data.data_utils import synchronized_dataloader_step
+from data.rlds_generator import RLDSDataGenerator
 
 #Otherwise, the tokenizer will throw a warning
 import os
@@ -86,6 +90,79 @@ def get_dataloaders(train_cfg, vlm_cfg):
     image_processor = get_image_processor(vlm_cfg.max_img_size, vlm_cfg.vit_img_size)
     tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
 
+    # Create collators
+    vqa_collator = VQACollator(tokenizer, vlm_cfg.lm_max_length)
+    g = torch.Generator()
+    g.manual_seed(0)
+
+    if train_cfg.use_rlds:
+        print("--- Using RLDS Data Pipeline ---")
+        base_path = "/home/timely/lklein/vla/modified_libero_rlds"
+        dataset_paths = glob.glob(f"{base_path}/libero_*_no_noops/1.0.0")
+        action_bins_path = "action_bins.npy" # Assumes this is in the run directory
+        action_bins_info_path = "action_bins_info.json" # Assumes this is in the run directory
+
+        if not dataset_paths:
+            raise FileNotFoundError(f"No RLDS datasets found at '{base_path}'. Please check the path.")
+
+        # 1. Initialize the generator that streams raw data
+        # First, calculate the correct starting ID for our action tokens
+        action_bins = np.load(action_bins_path)
+        num_action_tokens = (action_bins.shape[1] - 1) * action_bins.shape[0]
+        action_token_begin_id = len(tokenizer) - num_action_tokens
+
+        print(f"Train: Tokenizer vocab size is {len(tokenizer)}")
+        print(f"Train: Action token start ID is {action_token_begin_id}")
+
+        train_generator = RLDSDataGenerator(
+            rlds_paths=dataset_paths,
+            tokenizer=tokenizer,
+            action_bins_path=action_bins_path,
+            action_bins_info_path=action_bins_info_path,
+            action_token_begin_id=action_token_begin_id,
+            split='train',
+            val_ratio=train_cfg.val_ratio,
+        )
+        val_generator = RLDSDataGenerator(
+            rlds_paths=dataset_paths,
+            tokenizer=tokenizer,
+            action_bins_path=action_bins_path,
+            action_bins_info_path=action_bins_info_path,
+            action_token_begin_id=action_token_begin_id,
+            split='validation',
+            val_ratio=train_cfg.val_ratio,
+        )
+
+        # 2. Wrap each generator with VQAIterableDataset to apply model-specific processing
+        train_dataset = VQAIterableDataset(train_generator, tokenizer, image_processor, vlm_cfg.mp_image_token_length)
+        val_dataset = VQAIterableDataset(val_generator, tokenizer, image_processor, vlm_cfg.mp_image_token_length)
+
+        # 3. Create DataLoaders
+        # NOTE: We are not using ConstantLengthDataset here as it's incompatible with IterableDatasets.
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=train_cfg.batch_size,
+            collate_fn=vqa_collator,
+            num_workers=8,
+            pin_memory=True,
+            drop_last=True,
+            worker_init_fn=seed_worker,
+            generator=g,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=train_cfg.batch_size,
+            collate_fn=vqa_collator,
+            num_workers=8,
+            pin_memory=True,
+            drop_last=True,
+            worker_init_fn=seed_worker,
+            generator=g,
+        )
+        return train_loader, val_loader
+
+    # --- Original Data Pipeline ---
+    print("--- Using Original Hugging Face Data Pipeline ---")
     # Load and combine all training datasets
     combined_train_data = []
 
@@ -128,14 +205,7 @@ def get_dataloaders(train_cfg, vlm_cfg):
                                           max_images_per_example=train_cfg.max_images_per_example, max_images_per_knapsack=train_cfg.max_images_per_knapsack)
     val_dataset = VQADataset(train_ds.select(range(train_size, total_samples)), tokenizer, image_processor, vlm_cfg.mp_image_token_length)
 
-    # Create collators
-    vqa_collator = VQACollator(tokenizer, vlm_cfg.lm_max_length)
-
-    g = torch.Generator()
-    g.manual_seed(0)
-
     # Create dataloaders
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_cfg.batch_size,    # =per device BS in DDP
@@ -190,10 +260,12 @@ def train(train_cfg, vlm_cfg):
     tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
 
     run_name = get_run_name(train_cfg, vlm_cfg)
-    total_dataset_size = len(train_loader.dataset)
-    if train_cfg.log_wandb and is_master():
-        if train_cfg.data_cutoff_idx is None:
-            run_name = run_name.replace("full_ds", f"{total_dataset_size}samples")
+    if not train_cfg.use_rlds:
+        total_dataset_size = len(train_loader.dataset)
+        if train_cfg.log_wandb and is_master():
+            if train_cfg.data_cutoff_idx is None:
+                run_name = run_name.replace("full_ds", f"{total_dataset_size}samples")
+    
     if train_cfg.log_wandb and is_master():
         run = wandb.init(
             entity=train_cfg.wandb_entity,
@@ -228,15 +300,23 @@ def train(train_cfg, vlm_cfg):
             print("\n=== LoRA Configuration ===")
             model.print_trainable_parameters()
             print("===========================\n")
-
+    
     if is_master():
-        print(f"nanoVLM initialized with {sum(p.numel() for p in model.parameters()):,} parameters") 
-        print(f"Training summary{' (global)' if is_dist() else ''}: {len(train_loader.dataset)} samples, {int(len(train_loader)*get_world_size())} batches/epoch, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
-        if is_dist():
-            print(f"Training summary per GPU: {len(train_loader)} batches/epoch, batch size {train_loader.batch_size}")
-        print(f"Validation summary{' (global)' if is_dist() else ''}: {len(val_loader.dataset)} samples, {int(len(val_loader)*get_world_size())} batches/epoch, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
-        if is_dist():
-            print(f"Validation summary per GPU: {len(val_loader)} batches/epoch, batch size {val_loader.batch_size}")
+        total_params = sum(p.numel() for p in model.parameters())
+        if train_cfg.use_lora:
+            print(f"nanoVLM with LoRA initialized with {total_params:,} total parameters")
+        else:
+            print(f"nanoVLM initialized with {total_params:,} parameters")
+        if not train_cfg.use_rlds:
+            print(f"Training summary{' (global)' if is_dist() else ''}: {len(train_loader.dataset)} samples, {int(len(train_loader)*get_world_size())} batches/epoch, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
+            if is_dist():
+                print(f"Training summary per GPU: {len(train_loader)} batches/epoch, batch size {train_loader.batch_size}")
+            print(f"Validation summary{' (global)' if is_dist() else ''}: {len(val_loader.dataset)} samples, {int(len(val_loader)*get_world_size())} batches/epoch, batch size {int(train_cfg.batch_size*get_world_size()*train_cfg.gradient_accumulation_steps)}{', training on ' + str(get_world_size()) + ' GPUs' if is_dist() else ''}")
+            if is_dist():
+                print(f"Validation summary per GPU: {len(val_loader)} batches/epoch, batch size {val_loader.batch_size}")
+        else:
+            print("Training with iterable RLDS dataset (length is unknown).")
+
 
     # Define optimizer groups
     # Since we have pretrained vision and language backbones, but a newly initialized modality projection layer, it doesn't make sense to train them with the same learning rate
@@ -292,7 +372,17 @@ def train(train_cfg, vlm_cfg):
         optimizer.zero_grad()
         data_load_start = time.time()
 
+        if is_master():
+            print(f"=== Starting Epoch {epoch} ===")
+            print(f"Entering DataLoader loop...")
+
         for i, batch in enumerate(synchronized_dataloader_step(train_loader, is_dist())):
+            if is_master() and i == 0:
+                print(f"✅ Got first batch! Batch keys: {batch.keys()}")
+                print(f"   - Input IDs shape: {batch['input_ids'].shape}")
+                print(f"   - Images count: {len(batch['images'])}")
+                print(f"   - Data loading took: {time.time() - data_load_start:.2f}s")
+            
             is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0 or i + 1 == len(train_loader)
             batch_start_time = time.time()
             images = batch["images"]
@@ -300,6 +390,9 @@ def train(train_cfg, vlm_cfg):
             labels = batch["labels"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             data_load_time = time.time() - data_load_start
+
+            if is_master() and i == 0:
+                print(f"✅ Moved first batch to device. Starting forward pass...")
 
             # When using DDP with gradient accumulation,
             # skip gradient synchronization on intermediate steps to save time.
@@ -320,10 +413,16 @@ def train(train_cfg, vlm_cfg):
                 with context:
                     _, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
 
+            if is_master() and i == 0:
+                print(f"✅ First forward pass completed! Loss: {loss.item():.4f}")
+
             if train_cfg.gradient_accumulation_steps > 1:
                 loss = loss / train_cfg.gradient_accumulation_steps
 
             loss.backward()
+
+            if is_master() and i == 0:
+                print(f"✅ First backward pass completed!")
 
             fw_bw_time = time.time() - fw_bw_start
             post_process_start = time.time()
@@ -469,6 +568,11 @@ def train(train_cfg, vlm_cfg):
                 
             if is_update_step:
                 global_step += 1
+                
+                # Add progress logging every 10 steps
+                if is_master() and global_step % 10 == 0:
+                    print(f"Step {global_step}: Loss {batch_loss:.4f}, Tokens/s {tokens_per_second:.1f}")
+                
                 if global_step >= train_cfg.max_training_steps:
                     break
             data_load_start = time.time()
@@ -523,6 +627,7 @@ def main():
     parser.add_argument('--log_wandb', type=bool, help='Log to wandb')
     parser.add_argument('--resume_from_vlm_checkpoint', type=bool, default=False, help='Resume training from VLM checkpoint specified by vlm_checkpoint_path (or default if not provided)')
     parser.add_argument('--no_log_wandb', action='store_true', help='Do not log to wandb')
+    parser.add_argument('--use_rlds', action='store_true', help='Use the RLDS dataset for training')
 
     args = parser.parse_args()
 
@@ -539,6 +644,8 @@ def main():
         train_cfg.compile = args.compile
     if args.no_log_wandb is True:
         train_cfg.log_wandb = False
+    if args.use_rlds:
+        train_cfg.use_rlds = True
 
     if args.resume_from_vlm_checkpoint and args.vlm_checkpoint_path is not None:
         train_cfg.resume_from_vlm_checkpoint = True
