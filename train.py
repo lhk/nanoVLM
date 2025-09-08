@@ -122,7 +122,7 @@ def get_dataloaders(train_cfg, vlm_cfg):
             action_token_begin_id=action_token_begin_id,
         )
         val_generator = RLDSDataGenerator(
-            rlds_paths=dataset_paths[3],
+            rlds_paths=dataset_paths[3:],
             tokenizer=tokenizer,
             action_bins_path=action_bins_path,
             action_bins_info_path=action_bins_info_path,
@@ -374,7 +374,7 @@ def train(train_cfg, vlm_cfg):
 
         for i, batch in enumerate(synchronized_dataloader_step(train_loader, is_dist())):
             if is_master() and i == 0:
-                print(f"✅ Got first batch! Batch keys: {batch.keys()}")
+                print(f"Got first batch! Batch keys: {batch.keys()}")
                 print(f"   - Input IDs shape: {batch['input_ids'].shape}")
                 print(f"   - Images count: {len(batch['images'])}")
                 print(f"   - Data loading took: {time.time() - data_load_start:.2f}s")
@@ -388,7 +388,7 @@ def train(train_cfg, vlm_cfg):
             data_load_time = time.time() - data_load_start
 
             if is_master() and i == 0:
-                print(f"✅ Moved first batch to device. Starting forward pass...")
+                print(f"Moved first batch to device. Starting forward pass...")
 
             # When using DDP with gradient accumulation,
             # skip gradient synchronization on intermediate steps to save time.
@@ -410,7 +410,7 @@ def train(train_cfg, vlm_cfg):
                     _, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
 
             if is_master() and i == 0:
-                print(f"✅ First forward pass completed! Loss: {loss.item():.4f}")
+                print(f"First forward pass completed! Loss: {loss.item():.4f}")
 
             if train_cfg.gradient_accumulation_steps > 1:
                 loss = loss / train_cfg.gradient_accumulation_steps
@@ -418,7 +418,7 @@ def train(train_cfg, vlm_cfg):
             loss.backward()
 
             if is_master() and i == 0:
-                print(f"✅ First backward pass completed!")
+                print(f"First backward pass completed!")
 
             fw_bw_time = time.time() - fw_bw_start
             post_process_start = time.time()
@@ -458,7 +458,7 @@ def train(train_cfg, vlm_cfg):
             accumulated_stats['post_process_time'].append(post_process_time)
             accumulated_stats['images_per_sample'].extend(images_per_sample)
             
-            if train_cfg.eval_in_epochs and global_step % train_cfg.eval_interval == 0 and is_update_step and global_step > 0:
+            if train_cfg.eval_in_epochs and global_step % train_cfg.eval_interval == 0 and is_update_step:# and global_step > 0:
                 model.eval()
                 if device == "cuda":
                     torch.cuda.empty_cache()
