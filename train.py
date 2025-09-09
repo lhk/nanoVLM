@@ -458,7 +458,7 @@ def train(train_cfg, vlm_cfg):
             accumulated_stats['post_process_time'].append(post_process_time)
             accumulated_stats['images_per_sample'].extend(images_per_sample)
             
-            if train_cfg.eval_in_epochs and global_step % train_cfg.eval_interval == 0 and is_update_step:# and global_step > 0:
+            if train_cfg.eval_in_epochs and global_step % train_cfg.eval_interval == 0 and is_update_step and global_step > 0:
                 model.eval()
                 if device == "cuda":
                     torch.cuda.empty_cache()

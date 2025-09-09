@@ -31,3 +31,6 @@ results/
 *.png
 
 env/
+action_bins_info.json
+action_bins.npy
+lusxvr/
