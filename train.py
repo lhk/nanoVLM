@@ -251,6 +251,24 @@ def get_lr(it, max_lr, max_steps):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
+def calculate_accuracy(logits, labels, ignore_index=-100):
+    """Calculates accuracy, ignoring a specific index."""
+    predictions = torch.argmax(logits, dim=-1)
+    
+    # Create a mask to ignore padding tokens
+    mask = (labels != ignore_index)
+    
+    # Compare predictions and labels, applying the mask
+    correct_predictions = (predictions == labels) & mask
+    
+    # Calculate accuracy
+    if mask.sum() > 0:
+        accuracy = correct_predictions.sum().float() / mask.sum().float()
+    else:
+        accuracy = torch.tensor(0.0)
+        
+    return accuracy
+
 def train(train_cfg, vlm_cfg):
     train_loader, val_loader = get_dataloaders(train_cfg, vlm_cfg)
     tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
@@ -407,7 +425,10 @@ def train(train_cfg, vlm_cfg):
             )
             with autocast_context:
                 with context:
-                    _, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
+                    logits, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
+            
+            # Calculate accuracy
+            accuracy = calculate_accuracy(logits, labels)
 
             if is_master() and i == 0:
                 print(f"First forward pass completed! Loss: {loss.item():.4f}")
@@ -464,6 +485,8 @@ def train(train_cfg, vlm_cfg):
                     torch.cuda.empty_cache()
                 with torch.no_grad():
                     total_val_loss = 0
+                    total_val_accuracy = 0
+                    val_batches = 0
                     for batch in val_loader:
                         images = batch["images"]
                         input_ids = batch["input_ids"].to(device)
@@ -471,11 +494,19 @@ def train(train_cfg, vlm_cfg):
                         attention_mask = batch["attention_mask"].to(device)
 
                         with autocast_context:
-                            _, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
-
+                            logits, loss = model(input_ids=input_ids, images=images, attention_mask=attention_mask, labels=labels)
+                        
                         total_val_loss += loss.item()
-                    avg_val_loss = total_val_loss / len(val_loader) if len(val_loader) > 0 else 0
-                    avg_val_loss = mean(dist_gather(avg_val_loss)) if is_dist() else avg_val_loss
+                        total_val_accuracy += calculate_accuracy(logits, labels).item()
+                        val_batches += 1
+
+                    avg_val_loss = total_val_loss / val_batches if val_batches > 0 else 0
+                    avg_val_accuracy = total_val_accuracy / val_batches if val_batches > 0 else 0
+                    
+                    if is_dist():
+                        avg_val_loss = mean(dist_gather(avg_val_loss))
+                        avg_val_accuracy = mean(dist_gather(avg_val_accuracy))
+                        
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         if is_master():
@@ -504,9 +535,13 @@ def train(train_cfg, vlm_cfg):
                                         lmms_results[f"{task_name}_{metric_name.split(',')[0]}"] = metric_value
                     
                     if is_master():
-                        print(f"Step: {global_step}, Val Loss: {avg_val_loss:.4f}, Tokens/s: {tokens_per_second:.2f}")
+                        print(f"Step: {global_step}, Val Loss: {avg_val_loss:.4f}, Val Acc: {avg_val_accuracy:.4f}, Tokens/s: {tokens_per_second:.2f}")
                         if train_cfg.log_wandb:
-                            run.log({"val_loss": avg_val_loss, **{f"lmms_eval/{key}": value for key, value in lmms_results.items()}}, step=global_step)
+                            run.log({
+                                "val_loss": avg_val_loss, 
+                                "val_accuracy": avg_val_accuracy,
+                                **{f"lmms_eval/{key}": value for key, value in lmms_results.items()}
+                            }, step=global_step)
 
                 model.train()
 
@@ -552,13 +587,16 @@ def train(train_cfg, vlm_cfg):
                 # ALL RANKS: gather loss from all ranks if DDP
                 if is_dist():
                     batch_loss_gathered = mean(dist_gather(batch_loss))
+                    accuracy_gathered = mean(dist_gather(accuracy.item()))
                 else:
                     batch_loss_gathered = batch_loss
+                    accuracy_gathered = accuracy.item()
                     
                 # MASTER ONLY: Log to wandb
                 if train_cfg.log_wandb and is_master():
                     run.log({
                         "batch_loss": batch_loss_gathered,
+                        "train_accuracy": accuracy_gathered,
                         **({"grad_norm": grad_norm} if train_cfg.max_grad_norm is not None else {})
                     }, step=global_step)
                 
