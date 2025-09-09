@@ -59,7 +59,7 @@ class TrainConfig:
     gradient_accumulation_steps: int = 16
     max_grad_norm: float = 1.0
     eval_in_epochs: bool = True
-    eval_interval: int = gradient_accumulation_steps * 100
+    eval_interval: int = gradient_accumulation_steps * 50
     stats_log_interval: int = gradient_accumulation_steps * 25
     max_training_steps: int = 5000
     max_images_per_example: int = 4
@@ -71,7 +71,7 @@ class TrainConfig:
     train_dataset_name: tuple[str, ...] = ("all", )
     wandb_entity: str = "privatlarsklein-personal" # Indicate the entity to log to in wandb
     log_wandb: bool = True
-    use_lmms_eval: bool = True # Use lmms-eval for evaluation
+    use_lmms_eval: bool = False # Use lmms-eval for evaluation
     lmms_eval_tasks: str = 'mmstar,mmmu,ocrbench,textvqa' # Pass additional task as one string, seperated by commas without spaces (e.g. 'mmstar,mmmu,ocrbench')
     lmms_eval_limit: int = 2000
     lmms_eval_batch_size: int = 128

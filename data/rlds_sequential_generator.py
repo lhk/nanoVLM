@@ -31,11 +31,12 @@ class RLDSDataGenerator(IterableDataset):
     discretization, and formats the output into a simple dictionary that can be
     consumed by a more complex downstream dataset, like `VQADataset`.
     """
-    def __init__(self, rlds_paths: list[str], tokenizer: AutoTokenizer, action_bins_path: str, action_bins_info_path: str, action_token_begin_id: int):
+    def __init__(self, rlds_paths: list[str], tokenizer: AutoTokenizer, action_bins_path: str, action_bins_info_path: str, action_token_begin_id: int, early_stop_after_n_samples: int = None):
         super().__init__()
         self.rlds_paths = rlds_paths
         self.tokenizer = tokenizer
         self.action_token_begin_id = action_token_begin_id
+        self.early_stop_after_n_samples = early_stop_after_n_samples
 
         # 1. Load the pre-computed action bin boundaries
         print(f"Loading action bins from: {action_bins_path}")
@@ -63,10 +64,11 @@ class RLDSDataGenerator(IterableDataset):
                 assert idx != -1, f"Dataset {dataset_name} not found in dataset info."
                 if idx < len(dataset_steps):
                     total_length += dataset_steps[idx]
-        
-            
-        self._len = total_length
-        print(f"Calculated length for {len(self.rlds_paths)} datasets: {self._len} samples")
+
+
+        self._len = min(self.early_stop_after_n_samples if self.early_stop_after_n_samples is not None else total_length, total_length)
+        print(f"Calculated length for {len(self.rlds_paths)} datasets: {self._len} samples" + 
+              (f" (early stop after {self.early_stop_after_n_samples} samples)" if self.early_stop_after_n_samples else ""))
 
     def _create_dataset_stream(self):
         # This function is now separate to be called by both __init__ and __iter__
@@ -75,10 +77,12 @@ class RLDSDataGenerator(IterableDataset):
             builder = tfds.builder_from_directory(builder_dir=path)
             ds = builder.as_dataset(split='train')
             datasets.append(ds)
+        
         concatenated_dataset = datasets[0]
         for ds in datasets[1:]:
             concatenated_dataset = concatenated_dataset.concatenate(ds)
-        return concatenated_dataset
+
+        return concatenated_dataset.shuffle(buffer_size=100)
     
     def __len__(self):
         return self._len
@@ -107,9 +111,15 @@ class RLDSDataGenerator(IterableDataset):
         # Re-create the dataset stream for each epoch
         iter_dataset = self._create_dataset_stream()
         
+        # Track sample count for early stopping
+        sample_count = 0
+        
         # The main data processing loop
         for episode in iter_dataset:
             for step in episode['steps'].as_numpy_iterator():
+                # Check for early stopping
+                if self.early_stop_after_n_samples is not None and sample_count >= self.early_stop_after_n_samples:
+                    return  # This ends the iterator
 
                 # a. Get raw data
                 instruction = step['language_instruction'].decode('utf-8')
@@ -126,6 +136,8 @@ class RLDSDataGenerator(IterableDataset):
                     'images': [image],
                     'texts': [{'user': instruction, 'assistant': action_string}]
                 }
+                
+                sample_count += 1
 
 if __name__ == '__main__':
     # This is a test harness to demonstrate how to use the generator.
