@@ -82,7 +82,7 @@ class RLDSDataGenerator(IterableDataset):
         for ds in datasets[1:]:
             concatenated_dataset = concatenated_dataset.concatenate(ds)
 
-        return concatenated_dataset.shuffle(buffer_size=100)
+        return concatenated_dataset
     
     def __len__(self):
         return self._len

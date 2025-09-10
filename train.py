@@ -127,7 +127,7 @@ def get_dataloaders(train_cfg, vlm_cfg):
             action_bins_path=action_bins_path,
             action_bins_info_path=action_bins_info_path,
             action_token_begin_id=action_token_begin_id,
-            early_stop_after_n_samples=10000,  # Limit validation to 50 samples for fast debugging
+            early_stop_after_n_samples=1000,  # Limit validation to 50 samples for fast debugging
         )
 
         # 2. Wrap each generator with VQAIterableDataset to apply model-specific processing
